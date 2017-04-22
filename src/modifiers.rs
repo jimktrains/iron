@@ -1,35 +1,53 @@
-//! Defines a series of convenience modifiers for editing Responses
+//! This module defines a series of convenience modifiers for changing
+//! Responses.
 //!
-//! Modifiers can be used to edit Responses through the owning
-//! method `set` or the mutating `set_mut`, both of which are
-//! defined in the `Set` trait.
+//! Modifiers can be used to edit `Response`s through the owning method `set`
+//! or the mutating `set_mut`, both of which are defined in the `Set` trait.
 //!
-//! Instead of having a combinatorial explosion of Response methods
-//! and constructors, this provides a series of modifiers that
-//! can be used through the `Set` trait.
+//! For Iron, the `Modifier` interface offers extensible and ergonomic response
+//! creation while avoiding the introduction of many highly specific `Response`
+//! constructors.
 //!
-//! For instance, instead of `Response::redirect` constructing a
-//! redirect response, we provide a `Redirect` modifier, so you
-//! can just do:
+//! The simplest case of a modifier is probably the one used to change the
+//! return status code:
 //!
 //! ```
 //! # use iron::prelude::*;
 //! # use iron::status;
-//! # use iron::modifiers::Redirect;
-//! # use iron::Url;
-//!
-//! let url = Url::parse("http://doc.rust-lang.org").unwrap();
-//! Response::with((status::Found, Redirect(url)));
+//! let r = Response::with(status::NotFound);
+//! assert_eq!(r.status.unwrap().to_u16(), 404);
 //! ```
 //!
-//! This is more extensible as it allows you to combine
-//! arbitrary modifiers without having a massive number of
-//! Response constructors.
+//! You can also pass in a tuple of modifiers, they will all be applied. Here's
+//! an example of a modifier 2-tuple that will change the status code and the
+//! body message:
+//!
+//! ```
+//! # use iron::prelude::*;
+//! # use iron::status;
+//! Response::with((status::ImATeapot, "I am a tea pot!"));
+//! ```
+//!
+//! There is also a `Redirect` modifier:
+//!
+//! ```
+//! # use iron::prelude::*;
+//! # use iron::status;
+//! # use iron::modifiers;
+//! # use iron::Url;
+//! let url = Url::parse("http://doc.rust-lang.org").unwrap();
+//! Response::with((status::Found, modifiers::Redirect(url)));
+//! ```
+//!
+//! The modifiers are applied depending on their type. Currently the easiest
+//! way to see how different types are used as modifiers, take a look at [the
+//! source code](https://github.com/iron/iron/blob/master/src/modifiers.rs).
 //!
 //! For more information about the modifier system, see
 //! [rust-modifier](https://github.com/reem/rust-modifier).
 
 use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use modifier::Modifier;
@@ -39,7 +57,7 @@ use hyper::mime::Mime;
 use {status, headers, Request, Response, Set, Url};
 
 use mime_types;
-use response::WriteBody;
+use response::{WriteBody, BodyReader};
 
 lazy_static! {
     static ref MIME_TYPES: mime_types::Types = mime_types::Types::new().unwrap();
@@ -52,10 +70,17 @@ impl Modifier<Response> for Mime {
     }
 }
 
-impl Modifier<Response> for Box<WriteBody + Send> {
+impl Modifier<Response> for Box<WriteBody> {
     #[inline]
     fn modify(self, res: &mut Response) {
         res.body = Some(self);
+    }
+}
+
+impl <R: io::Read + Send + 'static> Modifier<Response> for BodyReader<R> {
+    #[inline]
+    fn modify(self, res: &mut Response) {
+        res.body = Some(Box::new(self));
     }
 }
 
@@ -121,10 +146,9 @@ impl Modifier<Response> for PathBuf {
     /// ## Panics
     ///
     /// Panics if there is no file at the passed-in Path.
+    #[inline]
     fn modify(self, res: &mut Response) {
-        File::open(&self)
-            .expect(&format!("No such file: {}", self.display()))
-            .modify(res);
+        self.as_path().modify(res);
     }
 }
 
@@ -135,6 +159,7 @@ impl Modifier<Response> for status::Status {
 }
 
 /// A modifier for changing headers on requests and responses.
+#[derive(Clone)]
 pub struct Header<H: headers::Header + headers::HeaderFormat>(pub H);
 
 impl<H> Modifier<Response> for Header<H>
@@ -162,7 +187,7 @@ impl Modifier<Response> for Redirect {
 }
 
 /// A modifier for creating redirect responses.
-pub struct RedirectRaw(String);
+pub struct RedirectRaw(pub String);
 
 impl Modifier<Response> for RedirectRaw {
     fn modify(self, res: &mut Response) {
